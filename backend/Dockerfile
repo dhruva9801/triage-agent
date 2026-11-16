@@ -12,7 +12,7 @@
 # then write FROM python:3.12-slim-bookworm@sha256:<digest>.
 
 FROM ghcr.io/astral-sh/uv:0.13.8 AS uv
-FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lwa
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 AS lwa
 
 # ---- Export the locked, production-only dependency set (with hashes) --------
 FROM python:3.12-slim-bookworm AS export
