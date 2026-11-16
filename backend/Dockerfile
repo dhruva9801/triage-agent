@@ -57,6 +57,13 @@ CMD ["python", "-m", "uvicorn", "triage.api.app:app", "--host", "0.0.0.0", "--po
 # ---- worker target ----------------------------------------------------------------
 FROM public.ecr.aws/lambda/python:3.12 AS worker
 ARG GIT_SHA=dev
+# The Lambda base image lags behind Amazon Linux security fixes, so pull them
+# in at build time. The runtime interface emulator is a Go binary used only to
+# run this image outside Lambda; it never runs in AWS, so remove it rather
+# than ship its CVEs.
+RUN dnf -y upgrade --releasever=latest \
+    && dnf clean all \
+    && rm -f /usr/local/bin/aws-lambda-rie
 ENV PYTHONDONTWRITEBYTECODE=1 \
     GIT_SHA=${GIT_SHA}
 COPY --from=worker-deps /opt/deps ${LAMBDA_TASK_ROOT}
