@@ -30,7 +30,7 @@ RUN uv pip install --no-cache --require-hashes --target /opt/deps -r /tmp/requir
 # ---- Install deps for the worker image -----------------------------------------
 # Installed inside the Lambda base image itself, so compiled wheels match the
 # Lambda OS (Amazon Linux) rather than Debian.
-FROM public.ecr.aws/lambda/python:3.12 AS worker-deps
+FROM public.ecr.aws/lambda/python:3.15 AS worker-deps
 COPY --from=uv /uv /bin/uv
 COPY --from=export /build/requirements.txt /tmp/requirements.txt
 RUN uv pip install --no-cache --require-hashes --python /var/lang/bin/python3 \
@@ -55,7 +55,7 @@ EXPOSE 8080
 CMD ["python", "-m", "uvicorn", "triage.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
 
 # ---- worker target ----------------------------------------------------------------
-FROM public.ecr.aws/lambda/python:3.12 AS worker
+FROM public.ecr.aws/lambda/python:3.15 AS worker
 ARG GIT_SHA=dev
 # The Lambda base image lags behind Amazon Linux security fixes, so pull them
 # in at build time. The runtime interface emulator is a Go binary used only to
