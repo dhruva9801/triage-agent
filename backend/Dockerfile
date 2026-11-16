@@ -15,14 +15,14 @@ FROM ghcr.io/astral-sh/uv:0.13.8 AS uv
 FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lwa
 
 # ---- Export the locked, production-only dependency set (with hashes) --------
-FROM python:3.12-slim-bookworm AS export
+FROM python:3.15-slim-bookworm AS export
 COPY --from=uv /uv /bin/uv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv export --frozen --no-dev --no-emit-project -o requirements.txt
 
 # ---- Install deps for the api image (Debian userland) -------------------------
-FROM python:3.12-slim-bookworm AS api-deps
+FROM python:3.15-slim-bookworm AS api-deps
 COPY --from=uv /uv /bin/uv
 COPY --from=export /build/requirements.txt /tmp/requirements.txt
 RUN uv pip install --no-cache --require-hashes --target /opt/deps -r /tmp/requirements.txt
@@ -37,7 +37,7 @@ RUN uv pip install --no-cache --require-hashes --python /var/lang/bin/python3 \
       --target /opt/deps -r /tmp/requirements.txt
 
 # ---- api target -------------------------------------------------------------------
-FROM python:3.12-slim-bookworm AS api
+FROM python:3.15-slim-bookworm AS api
 ARG GIT_SHA=dev
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
