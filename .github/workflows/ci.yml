@@ -1,0 +1,156 @@
+name: ci
+
+# Runs on every pull request, and is called by deploy.yml before every deploy
+# so the exact commit being shipped is the one that was tested.
+on:
+  pull_request:
+  workflow_call:
+
+# Least privilege by default; jobs that need OIDC opt in.
+permissions:
+  contents: read
+
+env:
+  PROJECT: triage
+  UV_VERSION: "0.13.8"
+  TERRAFORM_VERSION: "1.17.2"
+
+jobs:
+  backend:
+    name: backend (lint, types, tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          working-directory: backend
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest
+
+  repo-scan:
+    name: repo scan (dependencies, secrets, IaC)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Blocking: known-vulnerable dependencies (fix available) and committed secrets.
+      - name: Vulnerabilities and secrets (blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      # Report-only for now: Terraform/Dockerfile misconfiguration checks.
+      # Triage the first report, suppress what you consciously accept in
+      # .trivyignore with a reason, then flip exit-code to "1".
+      - name: IaC misconfiguration (report only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+  images:
+    name: images (build + scan)
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [api, worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build ${{ matrix.target }}
+        run: |
+          docker build --platform linux/amd64 --provenance=false \
+            --target "${{ matrix.target }}" \
+            --build-arg GIT_SHA="${{ github.sha }}" \
+            -t "ci/${PROJECT}-${{ matrix.target }}:${{ github.sha }}" backend
+      - name: Scan ${{ matrix.target }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ci/${{ env.PROJECT }}-${{ matrix.target }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  terraform:
+    name: terraform (fmt, validate, plan)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the read-only plan role
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive infra
+      - name: Validate both stacks
+        run: |
+          for stack in infra/bootstrap infra/main; do
+            terraform -chdir="$stack" init -backend=false -input=false
+            terraform -chdir="$stack" validate
+          done
+
+      # Plan only runs once bootstrap is done and the repo variables exist.
+      - name: Assume read-only plan role
+        if: vars.AWS_PLAN_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Plan
+        if: vars.AWS_PLAN_ROLE_ARN != ''
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          cd infra/main
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${AWS_REGION}"
+
+          # Plan against the images currently deployed, so the plan shows
+          # infrastructure changes only, not a guaranteed image diff.
+          current_image() {
+            aws lambda get-function --function-name "$1" \
+              --query 'Code.ImageUri' --output text 2>/dev/null || echo "none:not-yet-deployed"
+          }
+          TF_VAR_api_image_uri="$(current_image "${PROJECT}-api")"
+          TF_VAR_worker_image_uri="$(current_image "${PROJECT}-worker")"
+          export TF_VAR_api_image_uri TF_VAR_worker_image_uri
+
+          # -lock=false: the plan role is read-only and cannot write the lock file.
+          terraform plan -input=false -lock=false -no-color -out=tfplan
+
+          # Publish resource addresses and actions only, never attribute
+          # values: job summaries are visible to anyone who can see the repo.
+          {
+            echo "### Terraform plan (infra/main)"
+            echo '```'
+            terraform show -no-color tfplan | grep -E '^\s+# |^Plan:|^No changes' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

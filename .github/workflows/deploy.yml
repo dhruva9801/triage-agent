@@ -1,0 +1,147 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deploys at once; never cancel one halfway through an apply.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PROJECT: triage
+  TERRAFORM_VERSION: "1.17.2"
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy:
+    needs: ci
+    # Skips cleanly until bootstrap is done and repo variables are set.
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    # Do NOT add `environment:` here without updating the deploy role's trust
+    # policy: it changes the OIDC sub claim (see infra/bootstrap/oidc.tf).
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume deploy role
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Build once. The image scanned below is byte-for-byte the image pushed
+      # and deployed; nothing is rebuilt between scan and deploy.
+      # --provenance=false: Docker attaches a build attestation by default,
+      # which turns the pushed image into a manifest list Lambda cannot run.
+      - name: Build images
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          for target in api worker; do
+            docker build --platform linux/amd64 --provenance=false \
+              --target "$target" \
+              --build-arg GIT_SHA="${GITHUB_SHA}" \
+              -t "${REGISTRY}/${PROJECT}-${target}:${GITHUB_SHA}" backend
+          done
+
+      - name: Scan api image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-api:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan worker image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-worker:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Push images and resolve digests
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          for target in api worker; do
+            repo="${PROJECT}-${target}"
+            # Tags are immutable. A re-run of the same commit must not fail
+            # trying to overwrite an image that is already there.
+            if aws ecr describe-images --repository-name "$repo" \
+                 --image-ids imageTag="${GITHUB_SHA}" >/dev/null 2>&1; then
+              echo "${repo}:${GITHUB_SHA} already in ECR; not pushing again"
+            else
+              docker push "${REGISTRY}/${repo}:${GITHUB_SHA}"
+            fi
+            digest="$(aws ecr describe-images --repository-name "$repo" \
+              --image-ids imageTag="${GITHUB_SHA}" \
+              --query 'imageDetails[0].imageDigest' --output text)"
+            # Deploy by digest, not tag: the reference can never change meaning.
+            echo "${target}_image=${REGISTRY}/${repo}@${digest}" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform apply
+        working-directory: infra/main
+        env:
+          TF_VAR_api_image_uri: ${{ steps.push.outputs.api_image }}
+          TF_VAR_worker_image_uri: ${{ steps.push.outputs.worker_image }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="region=${AWS_REGION}"
+          terraform apply -input=false -auto-approve
+
+      # Proves the NEW code is live, not merely that something answers.
+      - name: Smoke test
+        working-directory: infra/main
+        run: |
+          set -euo pipefail
+          url="$(terraform output -raw api_url)"
+          url="${url%/}/health"
+          for attempt in $(seq 1 10); do
+            body="$(curl -fsS --max-time 10 "$url" || true)"
+            if echo "$body" | jq -e --arg sha "$GITHUB_SHA" '.status == "ok" and .version == $sha' >/dev/null 2>&1; then
+              echo "Smoke test passed on attempt ${attempt}: ${body}"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: got '${body}', retrying"
+            sleep 6
+          done
+          echo "Smoke test failed: ${url} never reported version ${GITHUB_SHA}"
+          exit 1

@@ -1,0 +1,46 @@
+# Local stack: API, worker, and an SQS-compatible queue.
+#   docker compose up --build
+#   curl localhost:8080/health
+#   cd backend && uv run python scripts/send_test_message.py
+
+services:
+  api:
+    build:
+      context: ./backend
+      target: api
+      args:
+        GIT_SHA: local
+    ports:
+      - "8080:8080"
+    environment:
+      TRIAGE_ENV: local
+      AWS_REGION: us-east-1
+
+  worker:
+    # Reuses the api image: the local poller needs the same code and deps,
+    # but not the Lambda runtime.
+    build:
+      context: ./backend
+      target: api
+      args:
+        GIT_SHA: local
+    command: ["python", "-m", "triage.worker.local"]
+    environment:
+      TRIAGE_ENV: local
+      AWS_REGION: us-east-1
+      # ElasticMQ ignores credentials; boto3 refuses to sign without some.
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      SQS_ENDPOINT_URL: http://elasticmq:9324
+      WORK_QUEUE_URL: http://elasticmq:9324/000000000000/triage-work
+    depends_on:
+      - elasticmq
+    # ElasticMQ has no healthcheck tooling in its image; restart until it's up.
+    restart: on-failure
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.7.1
+    ports:
+      - "9324:9324"
+    volumes:
+      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
