@@ -11,7 +11,7 @@
 #   docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim-bookworm
 # then write FROM python:3.12-slim-bookworm@sha256:<digest>.
 
-FROM ghcr.io/astral-sh/uv:0.13.8 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lwa
 
 # ---- Export the locked, production-only dependency set (with hashes) --------
