@@ -15,8 +15,8 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "httpx2",
-    "moto[sqs]>=5.0",
-    "boto3-stubs[sqs]>=1.35",
+    "moto[dynamodb,s3,sqs]>=5.0",
+    "boto3-stubs[dynamodb,s3,sqs]>=1.35",
     "ruff>=0.8",
     "pyright[nodejs]>=1.1.390",
 ]

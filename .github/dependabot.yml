@@ -15,6 +15,12 @@ updates:
   - package-ecosystem: docker
     directory: /backend
     schedule: { interval: weekly }
+    # Moving to a new Python version is a deliberate change, not a weekly bump.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: lambda/python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: terraform
     directories: ["/infra/bootstrap", "/infra/main"]
