@@ -7,14 +7,18 @@ Follow in order. Each step ends with a check; do not move on until it passes.
 - Linux or macOS. On Windows, use WSL2 and keep the repo inside the Linux
   filesystem (`~/...`, not `/mnt/c/...`).
 - AWS CLI v2, Terraform 1.17.x, uv 0.13.x, the GitHub CLI, and Docker.
-- An AWS account with an IAM Identity Center admin user (not the root user)
-  and a CLI profile for it:
+- An AWS account with an IAM admin user (not the root user) that has MFA
+  and **no access keys**. The CLI gets short-lived credentials from the
+  console sign-in instead (AWS CLI 2.32+):
 
   ```bash
-  aws configure sso            # name the profile triage-admin
+  aws login --profile triage-admin   # sign in as the IAM user, not root
   export AWS_PROFILE=triage-admin
-  aws sts get-caller-identity  # must show the SSO role, not root
+  aws sts get-caller-identity        # Arn must end in :user/<name>
   ```
+
+  IAM Identity Center is the better option for teams, but it requires AWS
+  Organizations, which moves a Free-plan account onto the Paid plan.
 
 ## 1. Run it locally
 
