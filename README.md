@@ -59,7 +59,7 @@ its alarm. The rest is designed and arrives per the roadmap.
 ## Roadmap
 
 - [x] Walking skeleton: CI/CD, infrastructure, `/health`, queue worker, DLQ alarm
-- [ ] Data layer: DynamoDB table, S3 bucket, posting store with conditional writes
+- [x] Data layer: DynamoDB table, S3 bucket, posting store with conditional writes
 - [ ] Auth: Cognito user pool, JWT validation at the gateway and in the app
 - [ ] Ingest: submit and list postings, per-user daily quota
 - [ ] Worker pipeline: lease-based state machine, resume from last good stage
